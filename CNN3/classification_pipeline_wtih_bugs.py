@@ -1,75 +1,62 @@
 import torch
+import torch.nn as nn
+import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 
-import torch.nn as nn
-
-import torch.optim as optim
-import torch.nn.functional as F
-
 from classification_pipeline import Accuracy
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
-
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=1, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
-
-        # If input and output channels are different, adjust the shortcut connection
-        if in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels)
-            )
-        else:
-            self.shortcut = nn.Identity()
+        self.shortcut = self._create_shortcut(in_channels, out_channels, stride)
 
     def forward(self, x):
-        shortcut = self.shortcut(x)  # Save the input for the residual connection
+        shortcut = self.shortcut(x)
 
-        # Apply the two convolutions
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-
-        x = self.conv2(x)
-        x = self.bn2(x)
-
-        # Add the shortcut (residual connection)
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
         x += shortcut
         x = self.relu(x)
 
         return x
 
+    def _create_shortcut(self, in_channels, out_channels, stride):
+        if in_channels != out_channels or stride != 1:
+            return nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+        else:
+            return nn.Identity()
+
+
 class ResNet(nn.Module):
     def __init__(self, num_classes=10):
         super(ResNet, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-
-        # Define a few residual blocks
-        self.layer1 = ResidualBlock(64, 64)
-        self.layer2 = ResidualBlock(64, 128, stride=2)
-
-        # Classifier
-        self.fc = nn.Linear(128 * 8 * 8, num_classes)  # Adjust for 32x32 image size
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False),  # Reduced initial channels
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            ResidualBlock(64, 128),
+            ResidualBlock(128, 256, stride=2),
+            ResidualBlock(256, 512, stride=2),
+            nn.AdaptiveAvgPool2d((1, 1))  # Add adaptive pooling
+        )
+        self.classifier = nn.Linear(512, num_classes)  # Adjusted input size
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-
+        x = self.features(x)
         x = torch.flatten(x, 1)
-        x = self.fc(x)
-
+        x = self.classifier(x)
         return x
+
 
 # Training function
 def train(model, trainloader, optimizer, criterion, device, accuracy):
@@ -77,7 +64,7 @@ def train(model, trainloader, optimizer, criterion, device, accuracy):
     running_loss = 0.0
 
     log_period = 100
-    # log_period = 1 # Overfit on one batch
+    log_period = 1  # Overfit on one batch
 
     for i, (inputs, labels) in enumerate(trainloader):
         inputs, labels = inputs.to(device), labels.to(device)
@@ -96,11 +83,11 @@ def train(model, trainloader, optimizer, criterion, device, accuracy):
         running_loss += loss.item()
         if i % log_period == (log_period - 1):
             print(f"[{i + 1}] loss: {running_loss / log_period :.4f}, accuracy: {accuracy.compute()}")
-            running_loss = 0.0
 
             accuracy.reset()
 
-        # break # Overfit on one batch
+        break  # Overfit on one batch
+
 
 def evaluate(model, testloader, device):
     model.eval()
@@ -129,8 +116,8 @@ if __name__ == '__main__':
     ])
 
     transform_test = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize((0.4915, 0.4822, 0.4466), (0.2463, 0.2428, 0.2607))
     ])
 
     # Load CIFAR-10 dataset
@@ -138,8 +125,9 @@ if __name__ == '__main__':
     test_dataset = torchvision.datasets.CIFAR10(root='../data', train=False, download=True, transform=transform_test)
 
     # Load CIFAR10 train and test datasets
-    trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=False)
-    testloader = torch.utils.data.DataLoader(test_dataset, batch_size=64, shuffle=False)
+    trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=False)
+    # trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+    testloader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False)  # Overfit on one batch
 
     # Create the ResNet model
     model = ResNet(num_classes=10)
@@ -150,20 +138,13 @@ if __name__ == '__main__':
 
     # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-6)
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    # optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
     accuracy = Accuracy()
 
-    for epoch in range(10000):
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
+
+    for epoch in range(200):  # Reduce number of epochs
         train(model, trainloader, optimizer, criterion, device, accuracy)
         evaluate(model, testloader, device)
-
-    # Task:
-    # 1. Overfit on one batch
-    # Result: loss: 0.0000, accuracy: 1.0
-
-    # 2. Simple train
-    # Result:
-    # Test accuracy: 78.95%
-    # [100] loss: 0.6216, accuracy: 0.7854310274124146
-
-
+        scheduler.step()
