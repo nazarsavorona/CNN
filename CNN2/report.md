@@ -297,7 +297,6 @@ test_loss 1.39614737033844
 
 #### More features in Convolutional Layers (128 output channels)
 
-```markdown
 
 ##### Results after 5 epochs
 
